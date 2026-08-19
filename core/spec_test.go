@@ -91,6 +91,7 @@ func TestNewSpec(t *testing.T) {
 	// Env.
 	wantEnv := map[string]string{
 		"JACK_AGENT":          "scout",
+		"IS_SANDBOX":          "1",
 		"GIT_AUTHOR_NAME":     "Ada",
 		"GIT_COMMITTER_NAME":  "Ada",
 		"GIT_AUTHOR_EMAIL":    "ada@example.com",

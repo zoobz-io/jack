@@ -78,6 +78,11 @@ func NewSpec(id *domain.Identity, profile config.Profile, env *config.Env, ca co
 	}
 	session["JACK_AGENT"] = string(id.Agent())
 
+	// claude refuses --dangerously-skip-permissions as root unless the
+	// environment declares itself a sandbox; the jack container is exactly
+	// that, so say so or bypassPermissions sessions exit on launch.
+	session["IS_SANDBOX"] = "1"
+
 	// docker exec does not inherit the host's COLORTERM, so claude can't detect
 	// 24-bit color support inside the container. Propagate it, defaulting to
 	// truecolor so it is always set.

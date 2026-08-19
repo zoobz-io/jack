@@ -3,6 +3,8 @@ package handler
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -18,7 +20,7 @@ func TestInSessionExistsAttaches(t *testing.T) {
 	d := &fakeDocker{}
 	app := testApp(env, profileConfig("alex"), d, tm, &fakeGit{})
 
-	if err := in(context.Background(), app, "alex", "jack"); err != nil {
+	if err := in(context.Background(), app, "alex", "jack", false); err != nil {
 		t.Fatalf("in returned error: %v", err)
 	}
 
@@ -43,7 +45,7 @@ func TestInStartsContainerAndCreatesSession(t *testing.T) {
 	d := &fakeDocker{RunningErr: errors.New("no such container")}
 	app := testApp(env, profileConfig("alex"), d, tm, &fakeGit{})
 
-	if err := in(context.Background(), app, "alex", "jack"); err != nil {
+	if err := in(context.Background(), app, "alex", "jack", false); err != nil {
 		t.Fatalf("in returned error: %v", err)
 	}
 
@@ -66,6 +68,43 @@ func TestInStartsContainerAndCreatesSession(t *testing.T) {
 	if len(d.ExecCalls) != 0 {
 		t.Errorf("Exec called %d times, want 0", len(d.ExecCalls))
 	}
+
+	// A fresh start seeds the agent's private Claude state before the mounts.
+	if _, err := os.Stat(env.ClaudeDir("alex")); err != nil {
+		t.Errorf("agent claude dir not seeded: %v", err)
+	}
+	if _, err := os.Stat(env.ClaudeJSON("alex")); err != nil {
+		t.Errorf("agent claude.json not seeded: %v", err)
+	}
+}
+
+func TestInReseedRelinksCredentials(t *testing.T) {
+	home := claudeHome(t)
+	env := testEnv(t)
+
+	// Session already exists, so in only attaches — but --reseed must still
+	// relink the agent's credentials from the host login first.
+	tm := &fakeTmux{HasResult: true}
+	app := testApp(env, profileConfig("alex"), &fakeDocker{}, tm, &fakeGit{})
+
+	if err := in(context.Background(), app, "alex", "jack", true); err != nil {
+		t.Fatalf("in returned error: %v", err)
+	}
+
+	ai, err := os.Stat(filepath.Join(env.ClaudeDir("alex"), ".credentials.json"))
+	if err != nil {
+		t.Fatalf("agent credentials missing after reseed: %v", err)
+	}
+	hi, err := os.Stat(filepath.Join(home, ".claude", ".credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(ai, hi) {
+		t.Error("reseeded credentials are not hard-linked to the host's")
+	}
+	if len(tm.AttachNames) != 1 {
+		t.Errorf("Attach = %v, want one call", tm.AttachNames)
+	}
 }
 
 func TestInRemovesStoppedContainerBeforeRun(t *testing.T) {
@@ -79,7 +118,7 @@ func TestInRemovesStoppedContainerBeforeRun(t *testing.T) {
 	d := &fakeDocker{RunningResult: false, RunningErr: nil}
 	app := testApp(env, profileConfig("alex"), d, tm, &fakeGit{})
 
-	if err := in(context.Background(), app, "alex", "jack"); err != nil {
+	if err := in(context.Background(), app, "alex", "jack", false); err != nil {
 		t.Fatalf("in returned error: %v", err)
 	}
 
@@ -104,7 +143,7 @@ func TestInStoppedContainerRemovalFails(t *testing.T) {
 	d := &fakeDocker{RunningResult: false, StopErr: errors.New("permission denied")}
 	app := testApp(env, profileConfig("alex"), d, tm, &fakeGit{})
 
-	if err := in(context.Background(), app, "alex", "jack"); err == nil {
+	if err := in(context.Background(), app, "alex", "jack", false); err == nil {
 		t.Fatal("in succeeded despite failing to remove the stopped container")
 	}
 	if len(d.RunSpecs) != 0 {
@@ -123,7 +162,7 @@ func TestInModelResolution(t *testing.T) {
 		d := &fakeDocker{RunningErr: errors.New("no such container")}
 		app := testApp(testEnv(t), cfg, d, &fakeTmux{HasResult: false}, &fakeGit{})
 
-		if err := in(context.Background(), app, "alex", "jack"); err != nil {
+		if err := in(context.Background(), app, "alex", "jack", false); err != nil {
 			t.Fatalf("in returned error: %v", err)
 		}
 		if got := d.RunSpecs[0].Env["ANTHROPIC_MODEL"]; got != "claude-sonnet-5" {
@@ -141,7 +180,7 @@ func TestInModelResolution(t *testing.T) {
 		d := &fakeDocker{RunningErr: errors.New("no such container")}
 		app := testApp(testEnv(t), cfg, d, &fakeTmux{HasResult: false}, &fakeGit{})
 
-		if err := in(context.Background(), app, "alex", "jack"); err != nil {
+		if err := in(context.Background(), app, "alex", "jack", false); err != nil {
 			t.Fatalf("in returned error: %v", err)
 		}
 		if got := d.RunSpecs[0].Env["ANTHROPIC_MODEL"]; got != "claude-opus-4-8" {
@@ -161,7 +200,7 @@ func TestInPermissionResolution(t *testing.T) {
 		tm := &fakeTmux{HasResult: false}
 		app := testApp(testEnv(t), cfg, &fakeDocker{RunningErr: errors.New("no such container")}, tm, &fakeGit{})
 
-		if err := in(context.Background(), app, "alex", "jack"); err != nil {
+		if err := in(context.Background(), app, "alex", "jack", false); err != nil {
 			t.Fatalf("in returned error: %v", err)
 		}
 		if len(tm.CreateCalls) != 1 {
@@ -182,7 +221,7 @@ func TestInPermissionResolution(t *testing.T) {
 		tm := &fakeTmux{HasResult: false}
 		app := testApp(testEnv(t), cfg, &fakeDocker{RunningErr: errors.New("no such container")}, tm, &fakeGit{})
 
-		if err := in(context.Background(), app, "alex", "jack"); err != nil {
+		if err := in(context.Background(), app, "alex", "jack", false); err != nil {
 			t.Fatalf("in returned error: %v", err)
 		}
 		cmd := tm.CreateCalls[0].Cmd

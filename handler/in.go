@@ -23,18 +23,22 @@ func In(app *core.App) {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			agent, _ := cmd.Flags().GetString("agent")
 			project, _ := cmd.Flags().GetString("project")
-			return in(cmd.Context(), app, domain.Agent(agent), domain.Repo(project))
+			reseed, _ := cmd.Flags().GetBool("reseed")
+			return in(cmd.Context(), app, domain.Agent(agent), domain.Repo(project), reseed)
 		},
 	}
 	cmd.Flags().StringP("agent", "a", "", "agent name")
 	cmd.Flags().StringP("project", "p", "", "project name")
+	cmd.Flags().Bool("reseed", false, "replace the agent's Claude credentials with a fresh link to the host login")
 	app.Root().AddCommand(cmd)
 }
 
 // in attaches to a session, creating it (and its container) on demand. An empty
 // agent or project is resolved from the registry, interactively when there is
-// more than one choice.
-func in(ctx context.Context, app *core.App, agent domain.Agent, repo domain.Repo) error {
+// more than one choice. With reseed set, the agent's Claude credentials are
+// relinked from the host login first — the recovery path for a credential copy
+// that drifted from the host's after a token rotation.
+func in(ctx context.Context, app *core.App, agent domain.Agent, repo domain.Repo, reseed bool) error {
 	reg, err := config.NewRegistry(app.Env().RegistryPath)
 	if err != nil {
 		return fmt.Errorf("loading registry: %w", err)
@@ -62,6 +66,13 @@ func in(ctx context.Context, app *core.App, agent domain.Agent, repo domain.Repo
 		return err
 	}
 
+	if reseed {
+		if rerr := app.Env().ReseedClaudeCredentials(agent); rerr != nil {
+			return fmt.Errorf("reseeding credentials: %w", rerr)
+		}
+		fmt.Printf("reseeded Claude credentials for agent %s\n", agent)
+	}
+
 	// Attach to the session if it already exists.
 	if has, herr := app.Tmux().Has(ctx, id.Session); herr != nil {
 		return herr
@@ -83,10 +94,13 @@ func in(ctx context.Context, app *core.App, agent domain.Agent, repo domain.Repo
 				return fmt.Errorf("removing stopped container %s: %w", id.Container, serr)
 			}
 		}
-		spec, serr := core.NewSpec(id, profile, app.Env(), app.Config().CA)
-		if serr != nil {
+		// Seed the agent's private Claude state (auth plus a fresh memory) before
+		// the container mounts it.
+		if serr := app.Env().EnsureClaudeState(agent); serr != nil {
 			return serr
 		}
+
+		spec := core.NewSpec(id, profile, app.Env(), app.Config().CA)
 		if rerr := app.Docker().Run(ctx, *spec); rerr != nil {
 			return fmt.Errorf("starting container: %w", rerr)
 		}

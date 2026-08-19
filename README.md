@@ -42,7 +42,7 @@ The unit of work is an **agent + repo**. Everything jack names and manages deriv
         │                                + @anthropic-ai/claude-code
         │                                  /root/workspace/myapp   ◀── your clone (rw)
         │                                  /root/workspace/.claude  ◀── agent config (ro)
-        │                                  /root/.claude(.json)     ◀── Claude auth (rw)
+        │                                  /root/.claude(.json)     ◀── agent's Claude state (rw)
         │                                  /root/.jack/bin          ◀── tools volume (persists)
         │
         ├─ docker exec (cert bootstrap, setup scripts)
@@ -53,7 +53,7 @@ The unit of work is an **agent + repo**. Everything jack names and manages deriv
 ```
 
 1. **`clone`** builds the base image, clones the repo into `~/.jack/<agent>/<repo>`, sets the agent's git identity in the checkout, copies the agent's config into place, and records the pair in the registry.
-2. **`in`** starts the container (if needed), bootstraps a certificate when a CA is configured, runs any setup scripts, then launches `claude` inside a tmux session and attaches you to it.
+2. **`in`** seeds the agent's private Claude state from your host login on first use (credentials shared via hard link; history and memory stay per-agent), starts the container (if needed), bootstraps a certificate when a CA is configured, runs any setup scripts, then launches `claude` inside a tmux session and attaches you to it.
 3. **`out`** / **`kill`** tear the session (and optionally everything else) back down.
 
 ---
@@ -167,8 +167,13 @@ jack manages this tree itself; you don't edit it by hand:
 ├── registry.yaml             # which repos are cloned for which agents
 └── <agent>/
     ├── .claude/              # agent config, copied from ~/.config/jack/agents/<agent>/
+    ├── claude/               # agent's private Claude state (history, memory);
+    │                         #   credentials seeded from ~/.claude by hard link
+    ├── claude.json           # agent's claude.json, seeded with account keys only
     └── <repo>/               # the clone (mounted rw into the container)
 ```
+
+The `claude/` state is what makes agents Claude-deep identities rather than just git identities: each agent accumulates its own history and project memory, invisible to your host session and to other agents. Only the login is shared — the credentials file is hard-linked to the host's, so a token refresh on either side stays in sync. If a credential ever drifts (e.g. the link degraded to a copy across filesystems and a rotation broke it), `jack in --reseed` relinks it from the host login without touching the agent's memory.
 
 ---
 
@@ -177,7 +182,7 @@ jack manages this tree itself; you don't edit it by hand:
 ```
 jack init  [--agent] [--git-name] [--git-email] [--github] [--build]  Scaffold config
 jack clone <url> --agent <name>...   Clone a repo into one or more agents' workspaces
-jack in    [--agent] [--project]     Enter (attach or create) a session
+jack in    [--agent] [--project] [--reseed]  Enter (attach or create) a session
 jack out   [name | --agent --project]  Terminate a session and stop its container
 jack kill  [--agent] [--project]     Tear down everything for an agent-repo
 jack status                          Show agents, sessions, and containers
@@ -216,9 +221,10 @@ jack clone https://github.com/zoobzio/myapp -a alex --force
 ```sh
 jack in --agent alex --project myapp    # explicit
 jack in                                 # pick agent + project interactively
+jack in -a alex -p myapp --reseed       # also relink the agent's Claude credentials from the host
 ```
 
-`in` starts the container if it isn't running, bootstraps the agent's certificate (when a CA is configured), runs setup scripts, launches `claude` in the agent's permission mode, and attaches you. If the session already exists, it just re-attaches.
+`in` starts the container if it isn't running — seeding the agent's private Claude state on first use, then bootstrapping the agent's certificate (when a CA is configured) and running setup scripts — launches `claude` in the agent's permission mode, and attaches you. If the session already exists, it just re-attaches.
 
 ### Leave or tear down
 
@@ -230,7 +236,7 @@ jack kill -a alex -p myapp        # full teardown, with a confirmation prompt
 jack kill -a alex -p myapp -f     # skip the prompt
 ```
 
-`out` stops the container but keeps the clone and tools volume, so you can `jack in` again cheaply. `kill` removes **everything** jack created for the pair — session, container, tools volume, on-disk clone, and registry entry — erasing the agent's memories and any uncommitted local changes.
+`out` stops the container but keeps the clone and tools volume, so you can `jack in` again cheaply. `kill` removes **everything** jack created for the pair — session, container, tools volume, on-disk clone, and registry entry — erasing the agent's memories and any uncommitted local changes. Killing an agent's **last** repo also removes the rest of its directory, including its private Claude state; your host login is untouched.
 
 ### Check status
 
@@ -259,8 +265,8 @@ The base image is `node:22-slim` plus `git`, `curl`, the smallstep `step` CLI, a
 
 ```
 /root/
-├── .claude               ← ~/.claude          (Claude Code auth, rw)
-├── .claude.json          ← ~/.claude.json     (rw)
+├── .claude               ← ~/.jack/<agent>/claude       (agent's Claude state, rw)
+├── .claude.json          ← ~/.jack/<agent>/claude.json  (rw)
 ├── .config/jack          ← ~/.config/jack     (read-only, for setup scripts)
 ├── .jack/
 │   ├── bin               ← named tools volume (persists across sessions)

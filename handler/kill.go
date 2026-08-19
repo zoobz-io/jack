@@ -98,6 +98,17 @@ func kill(ctx context.Context, app *core.App, agent domain.Agent, repo domain.Re
 		return fmt.Errorf("saving registry: %w", serr)
 	}
 
+	// The agent's last repo takes the rest of the agent directory with it: the
+	// workspace .claude copy and the agent's private Claude state — the
+	// "memories" the confirmation prompt warned about. (Credentials there are a
+	// hard link, so the host login is unaffected.)
+	if len(reg.ReposForAgent(agent)) == 0 {
+		agentDir := filepath.Join(app.Env().DataDir, string(agent))
+		if rerr := os.RemoveAll(agentDir); rerr != nil {
+			return fmt.Errorf("removing %s: %w", agentDir, rerr)
+		}
+	}
+
 	fmt.Printf("killed %s for agent %s\n", repo, agent)
 	return nil
 }

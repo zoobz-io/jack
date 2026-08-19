@@ -52,6 +52,52 @@ func TestKillForceRemovesEverything(t *testing.T) {
 	if reg2.Find("alex", "jack") != nil {
 		t.Errorf("registry still has alex/jack, want removed")
 	}
+	// jack was alex's only repo, so the whole agent dir — including the private
+	// Claude state — goes with it.
+	agentDir := filepath.Join(env.DataDir, "alex")
+	if _, statErr := os.Stat(agentDir); !os.IsNotExist(statErr) {
+		t.Errorf("agent dir still exists (%v), want removed with the last repo", statErr)
+	}
+}
+
+func TestKillKeepsAgentDirWhileReposRemain(t *testing.T) {
+	env := testEnv(t)
+	app := testApp(env, nil, &fakeDocker{}, &fakeTmux{HasResult: false}, nil)
+
+	// alex has two repos; killing one must keep the agent dir (and with it the
+	// agent's Claude state) for the survivor.
+	for _, repo := range []string{"jack", "other"} {
+		if err := os.MkdirAll(filepath.Join(env.DataDir, "alex", repo), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claudeState := filepath.Join(env.DataDir, "alex", "claude")
+	if err := os.MkdirAll(claudeState, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := config.NewRegistry(env.RegistryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.Add("alex", "jack", "https://host/u/jack.git")
+	reg.Add("alex", "other", "https://host/u/other.git")
+	if err := reg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := kill(context.Background(), app, "alex", "jack", true); err != nil {
+		t.Fatalf("kill returned error: %v", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(env.DataDir, "alex", "jack")); !os.IsNotExist(statErr) {
+		t.Errorf("killed clone still exists (%v), want removed", statErr)
+	}
+	if _, statErr := os.Stat(claudeState); statErr != nil {
+		t.Errorf("agent Claude state removed while repos remain: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(env.DataDir, "alex", "other")); statErr != nil {
+		t.Errorf("surviving clone removed: %v", statErr)
+	}
 }
 
 func TestKillForceSkipsKillForAbsentSession(t *testing.T) {

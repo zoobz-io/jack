@@ -1,7 +1,6 @@
 package core
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -37,25 +36,15 @@ type Spec struct {
 	Volumes []Volume
 }
 
-// NewSpec assembles the container Spec for an agent-repo session: the container
-// name, the bind mounts, the persistent tools volume, and the environment. It
-// returns an error if the user's home directory cannot be resolved or the
-// host's Claude state is not in place to mount (see claudeState).
-func NewSpec(id *domain.Identity, profile config.Profile, env *config.Env, ca config.CAConfig) (*Spec, error) {
-	homedir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("resolving home directory: %w", err)
-	}
-
-	claudeDir, claudeJSON, err := claudeState(homedir)
-	if err != nil {
-		return nil, err
-	}
-
+// NewSpec assembles the container Spec for an agent-repo session: the
+// container name, the bind mounts, the persistent tools volume, and the
+// environment. The agent's private Claude state paths are mounted as-is; the
+// caller must have seeded them first (see Env.EnsureClaudeState).
+func NewSpec(id *domain.Identity, profile config.Profile, env *config.Env, ca config.CAConfig) *Spec {
 	agentDir := filepath.Join(env.DataDir, string(id.Agent()))
 	mounts := []Mount{
-		{Source: claudeDir, Target: home + "/.claude"},
-		{Source: claudeJSON, Target: home + "/.claude.json"},
+		{Source: env.ClaudeDir(id.Agent()), Target: home + "/.claude"},
+		{Source: env.ClaudeJSON(id.Agent()), Target: home + "/.claude.json"},
 		{Source: filepath.Join(agentDir, ".claude"), Target: home + "/workspace/.claude", ReadOnly: true},
 		{Source: filepath.Join(agentDir, string(id.Repo())), Target: home + "/workspace/" + string(id.Repo())},
 		// The user's jack config, read-only, so setup scripts can run from it.
@@ -118,37 +107,5 @@ func NewSpec(id *domain.Identity, profile config.Profile, env *config.Env, ca co
 		Mounts:  mounts,
 		Volumes: []Volume{tools},
 		Env:     session,
-	}, nil
-}
-
-// claudeState locates the host's Claude state (~/.claude and ~/.claude.json)
-// and verifies it exists before it is bind-mounted. Docker creates a missing
-// bind source as a root-owned directory, which would break claude both in the
-// container and on the host, so a missing path is an error directing the user
-// to log in on the host first rather than a mount that silently poisons it.
-func claudeState(homedir string) (dir, file string, err error) {
-	dir = filepath.Join(homedir, ".claude")
-	file = filepath.Join(homedir, ".claude.json")
-
-	info, err := os.Stat(dir)
-	switch {
-	case os.IsNotExist(err):
-		return "", "", fmt.Errorf("%s not found — run `claude` on the host once to log in before starting a session", dir)
-	case err != nil:
-		return "", "", fmt.Errorf("checking %s: %w", dir, err)
-	case !info.IsDir():
-		return "", "", fmt.Errorf("%s is not a directory", dir)
 	}
-
-	info, err = os.Stat(file)
-	switch {
-	case os.IsNotExist(err):
-		return "", "", fmt.Errorf("%s not found — run `claude` on the host once to log in before starting a session", file)
-	case err != nil:
-		return "", "", fmt.Errorf("checking %s: %w", file, err)
-	case info.IsDir():
-		return "", "", fmt.Errorf("%s is a directory, not a file — an earlier bind mount likely created it; remove it and run `claude` on the host to log in again", file)
-	}
-
-	return dir, file, nil
 }

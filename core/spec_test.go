@@ -9,21 +9,6 @@ import (
 	"github.com/zoobzio/jack/domain"
 )
 
-// claudeHome points HOME at a temp dir seeded with the host Claude state
-// (~/.claude and ~/.claude.json) that NewSpec requires before mounting.
-func claudeHome(t *testing.T) string {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o750); err != nil {
-		t.Fatalf("mkdir .claude: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte("{}"), 0o600); err != nil {
-		t.Fatalf("write .claude.json: %v", err)
-	}
-	return home
-}
-
 // findMount returns the mount with the given container Target, or nil.
 func findMount(mounts []Mount, target string) *Mount {
 	for i := range mounts {
@@ -35,8 +20,6 @@ func findMount(mounts []Mount, target string) *Mount {
 }
 
 func TestNewSpec(t *testing.T) {
-	homedir := claudeHome(t)
-
 	dataDir := t.TempDir()
 	configDir := t.TempDir()
 
@@ -60,22 +43,21 @@ func TestNewSpec(t *testing.T) {
 		Provisioner: "jack",
 	}
 
-	spec, err := NewSpec(id, profile, env, ca)
-	if err != nil {
-		t.Fatalf("NewSpec: %v", err)
-	}
+	spec := NewSpec(id, profile, env, ca)
 
 	if spec.Name != id.Container {
 		t.Errorf("spec.Name = %q, want %q", spec.Name, id.Container)
 	}
 
-	// The four standard binds plus the read-only .config/jack mount.
+	// The four standard binds plus the read-only .config/jack mount. The Claude
+	// state binds come from the agent's private state under DataDir, not the
+	// host's ~/.claude.
 	wantMounts := map[string]struct {
 		source   string
 		readOnly bool
 	}{
-		home + "/.claude":           {source: filepath.Join(homedir, ".claude"), readOnly: false},
-		home + "/.claude.json":      {source: filepath.Join(homedir, ".claude.json"), readOnly: false},
+		home + "/.claude":           {source: filepath.Join(dataDir, "scout", "claude"), readOnly: false},
+		home + "/.claude.json":      {source: filepath.Join(dataDir, "scout", "claude.json"), readOnly: false},
 		home + "/workspace/.claude": {source: filepath.Join(dataDir, "scout", ".claude"), readOnly: true},
 		home + "/workspace/myrepo":  {source: filepath.Join(dataDir, "scout", "myrepo"), readOnly: false},
 		home + "/.config/jack":      {source: configDir, readOnly: true},
@@ -125,7 +107,6 @@ func TestNewSpec(t *testing.T) {
 }
 
 func TestNewSpecModel(t *testing.T) {
-	claudeHome(t)
 	env := &config.Env{ConfigDir: t.TempDir(), DataDir: t.TempDir()}
 
 	id, err := domain.NewIdentity(domain.Agent("scout"), domain.Repo("myrepo"))
@@ -134,19 +115,13 @@ func TestNewSpecModel(t *testing.T) {
 	}
 
 	// A profile with a model sets ANTHROPIC_MODEL.
-	spec, err := NewSpec(id, config.Profile{Model: "claude-opus-4-8"}, env, config.CAConfig{})
-	if err != nil {
-		t.Fatalf("NewSpec: %v", err)
-	}
+	spec := NewSpec(id, config.Profile{Model: "claude-opus-4-8"}, env, config.CAConfig{})
 	if spec.Env["ANTHROPIC_MODEL"] != "claude-opus-4-8" {
 		t.Errorf("ANTHROPIC_MODEL = %q, want claude-opus-4-8", spec.Env["ANTHROPIC_MODEL"])
 	}
 
 	// A profile with no model leaves ANTHROPIC_MODEL unset.
-	spec, err = NewSpec(id, config.Profile{}, env, config.CAConfig{})
-	if err != nil {
-		t.Fatalf("NewSpec: %v", err)
-	}
+	spec = NewSpec(id, config.Profile{}, env, config.CAConfig{})
 	if _, ok := spec.Env["ANTHROPIC_MODEL"]; ok {
 		t.Errorf("ANTHROPIC_MODEL set unexpectedly = %q", spec.Env["ANTHROPIC_MODEL"])
 	}
@@ -161,12 +136,8 @@ func TestNewSpecColorterm(t *testing.T) {
 
 	// Propagates the host value when set.
 	t.Run("propagates", func(t *testing.T) {
-		claudeHome(t)
 		t.Setenv("COLORTERM", "24bit")
-		spec, err := NewSpec(id, config.Profile{}, env, config.CAConfig{})
-		if err != nil {
-			t.Fatalf("NewSpec: %v", err)
-		}
+		spec := NewSpec(id, config.Profile{}, env, config.CAConfig{})
 		if spec.Env["COLORTERM"] != "24bit" {
 			t.Errorf("COLORTERM = %q, want 24bit", spec.Env["COLORTERM"])
 		}
@@ -174,12 +145,8 @@ func TestNewSpecColorterm(t *testing.T) {
 
 	// Defaults to truecolor when the host has none.
 	t.Run("defaults", func(t *testing.T) {
-		claudeHome(t)
 		t.Setenv("COLORTERM", "")
-		spec, err := NewSpec(id, config.Profile{}, env, config.CAConfig{})
-		if err != nil {
-			t.Fatalf("NewSpec: %v", err)
-		}
+		spec := NewSpec(id, config.Profile{}, env, config.CAConfig{})
 		if spec.Env["COLORTERM"] != "truecolor" {
 			t.Errorf("COLORTERM = %q, want truecolor", spec.Env["COLORTERM"])
 		}
@@ -187,8 +154,6 @@ func TestNewSpecColorterm(t *testing.T) {
 }
 
 func TestNewSpecMinimal(t *testing.T) {
-	claudeHome(t)
-
 	dataDir := t.TempDir()
 	configDir := t.TempDir()
 	env := &config.Env{ConfigDir: configDir, DataDir: dataDir}
@@ -199,10 +164,7 @@ func TestNewSpecMinimal(t *testing.T) {
 	}
 
 	// Empty profile git and empty CA: only JACK_AGENT should be set.
-	spec, err := NewSpec(id, config.Profile{}, env, config.CAConfig{})
-	if err != nil {
-		t.Fatalf("NewSpec: %v", err)
-	}
+	spec := NewSpec(id, config.Profile{}, env, config.CAConfig{})
 
 	if spec.Env["JACK_AGENT"] != "scout" {
 		t.Errorf("JACK_AGENT = %q, want scout", spec.Env["JACK_AGENT"])
@@ -215,8 +177,6 @@ func TestNewSpecMinimal(t *testing.T) {
 }
 
 func TestNewSpecSupportRepoOnDisk(t *testing.T) {
-	claudeHome(t)
-
 	dataDir := t.TempDir()
 	configDir := t.TempDir()
 	env := &config.Env{ConfigDir: configDir, DataDir: dataDir}
@@ -233,10 +193,7 @@ func TestNewSpecSupportRepoOnDisk(t *testing.T) {
 	}
 
 	profile := config.Profile{Repos: []string{"https://host/u/other.git"}}
-	spec, err := NewSpec(id, profile, env, config.CAConfig{})
-	if err != nil {
-		t.Fatalf("NewSpec: %v", err)
-	}
+	spec := NewSpec(id, profile, env, config.CAConfig{})
 
 	m := findMount(spec.Mounts, "/repos/other")
 	if m == nil {
@@ -248,8 +205,6 @@ func TestNewSpecSupportRepoOnDisk(t *testing.T) {
 }
 
 func TestNewSpecSupportRepoMissingSkipped(t *testing.T) {
-	claudeHome(t)
-
 	dataDir := t.TempDir()
 	configDir := t.TempDir()
 	env := &config.Env{ConfigDir: configDir, DataDir: dataDir}
@@ -261,56 +216,9 @@ func TestNewSpecSupportRepoMissingSkipped(t *testing.T) {
 
 	// Support repo not created on disk -> skipped.
 	profile := config.Profile{Repos: []string{"https://host/u/other.git"}}
-	spec, err := NewSpec(id, profile, env, config.CAConfig{})
-	if err != nil {
-		t.Fatalf("NewSpec: %v", err)
-	}
+	spec := NewSpec(id, profile, env, config.CAConfig{})
 
 	if m := findMount(spec.Mounts, "/repos/other"); m != nil {
 		t.Errorf("support repo not on disk should be skipped, got mount %+v", m)
 	}
-}
-
-func TestNewSpecMissingClaudeState(t *testing.T) {
-	env := &config.Env{ConfigDir: t.TempDir(), DataDir: t.TempDir()}
-	id, err := domain.NewIdentity(domain.Agent("scout"), domain.Repo("myrepo"))
-	if err != nil {
-		t.Fatalf("NewIdentity: %v", err)
-	}
-
-	// No ~/.claude at all: the user has never logged in on the host.
-	t.Run("no claude dir", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
-		if _, err := NewSpec(id, config.Profile{}, env, config.CAConfig{}); err == nil {
-			t.Fatal("NewSpec succeeded with no host Claude state; want an error")
-		}
-	})
-
-	// ~/.claude present but ~/.claude.json missing.
-	t.Run("no claude json", func(t *testing.T) {
-		home := t.TempDir()
-		t.Setenv("HOME", home)
-		if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o750); err != nil {
-			t.Fatalf("mkdir .claude: %v", err)
-		}
-		if _, err := NewSpec(id, config.Profile{}, env, config.CAConfig{}); err == nil {
-			t.Fatal("NewSpec succeeded without ~/.claude.json; want an error")
-		}
-	})
-
-	// ~/.claude.json exists but as a directory — the state a bind mount with a
-	// missing source leaves behind.
-	t.Run("claude json is a directory", func(t *testing.T) {
-		home := claudeHome(t)
-		jsonPath := filepath.Join(home, ".claude.json")
-		if err := os.Remove(jsonPath); err != nil {
-			t.Fatalf("remove .claude.json: %v", err)
-		}
-		if err := os.Mkdir(jsonPath, 0o750); err != nil {
-			t.Fatalf("mkdir .claude.json: %v", err)
-		}
-		if _, err := NewSpec(id, config.Profile{}, env, config.CAConfig{}); err == nil {
-			t.Fatal("NewSpec succeeded with ~/.claude.json as a directory; want an error")
-		}
-	})
 }

@@ -9,6 +9,21 @@ import (
 	"github.com/zoobzio/jack/domain"
 )
 
+// claudeHome points HOME at a temp dir seeded with the host Claude state
+// (~/.claude and ~/.claude.json) that NewSpec requires before mounting.
+func claudeHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o750); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write .claude.json: %v", err)
+	}
+	return home
+}
+
 // findMount returns the mount with the given container Target, or nil.
 func findMount(mounts []Mount, target string) *Mount {
 	for i := range mounts {
@@ -20,8 +35,7 @@ func findMount(mounts []Mount, target string) *Mount {
 }
 
 func TestNewSpec(t *testing.T) {
-	homedir := t.TempDir()
-	t.Setenv("HOME", homedir)
+	homedir := claudeHome(t)
 
 	dataDir := t.TempDir()
 	configDir := t.TempDir()
@@ -111,7 +125,7 @@ func TestNewSpec(t *testing.T) {
 }
 
 func TestNewSpecModel(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	claudeHome(t)
 	env := &config.Env{ConfigDir: t.TempDir(), DataDir: t.TempDir()}
 
 	id, err := domain.NewIdentity(domain.Agent("scout"), domain.Repo("myrepo"))
@@ -147,7 +161,7 @@ func TestNewSpecColorterm(t *testing.T) {
 
 	// Propagates the host value when set.
 	t.Run("propagates", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
+		claudeHome(t)
 		t.Setenv("COLORTERM", "24bit")
 		spec, err := NewSpec(id, config.Profile{}, env, config.CAConfig{})
 		if err != nil {
@@ -160,7 +174,7 @@ func TestNewSpecColorterm(t *testing.T) {
 
 	// Defaults to truecolor when the host has none.
 	t.Run("defaults", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
+		claudeHome(t)
 		t.Setenv("COLORTERM", "")
 		spec, err := NewSpec(id, config.Profile{}, env, config.CAConfig{})
 		if err != nil {
@@ -173,7 +187,7 @@ func TestNewSpecColorterm(t *testing.T) {
 }
 
 func TestNewSpecMinimal(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	claudeHome(t)
 
 	dataDir := t.TempDir()
 	configDir := t.TempDir()
@@ -201,7 +215,7 @@ func TestNewSpecMinimal(t *testing.T) {
 }
 
 func TestNewSpecSupportRepoOnDisk(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	claudeHome(t)
 
 	dataDir := t.TempDir()
 	configDir := t.TempDir()
@@ -234,7 +248,7 @@ func TestNewSpecSupportRepoOnDisk(t *testing.T) {
 }
 
 func TestNewSpecSupportRepoMissingSkipped(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	claudeHome(t)
 
 	dataDir := t.TempDir()
 	configDir := t.TempDir()
@@ -255,4 +269,48 @@ func TestNewSpecSupportRepoMissingSkipped(t *testing.T) {
 	if m := findMount(spec.Mounts, "/repos/other"); m != nil {
 		t.Errorf("support repo not on disk should be skipped, got mount %+v", m)
 	}
+}
+
+func TestNewSpecMissingClaudeState(t *testing.T) {
+	env := &config.Env{ConfigDir: t.TempDir(), DataDir: t.TempDir()}
+	id, err := domain.NewIdentity(domain.Agent("scout"), domain.Repo("myrepo"))
+	if err != nil {
+		t.Fatalf("NewIdentity: %v", err)
+	}
+
+	// No ~/.claude at all: the user has never logged in on the host.
+	t.Run("no claude dir", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		if _, err := NewSpec(id, config.Profile{}, env, config.CAConfig{}); err == nil {
+			t.Fatal("NewSpec succeeded with no host Claude state; want an error")
+		}
+	})
+
+	// ~/.claude present but ~/.claude.json missing.
+	t.Run("no claude json", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o750); err != nil {
+			t.Fatalf("mkdir .claude: %v", err)
+		}
+		if _, err := NewSpec(id, config.Profile{}, env, config.CAConfig{}); err == nil {
+			t.Fatal("NewSpec succeeded without ~/.claude.json; want an error")
+		}
+	})
+
+	// ~/.claude.json exists but as a directory — the state a bind mount with a
+	// missing source leaves behind.
+	t.Run("claude json is a directory", func(t *testing.T) {
+		home := claudeHome(t)
+		jsonPath := filepath.Join(home, ".claude.json")
+		if err := os.Remove(jsonPath); err != nil {
+			t.Fatalf("remove .claude.json: %v", err)
+		}
+		if err := os.Mkdir(jsonPath, 0o750); err != nil {
+			t.Fatalf("mkdir .claude.json: %v", err)
+		}
+		if _, err := NewSpec(id, config.Profile{}, env, config.CAConfig{}); err == nil {
+			t.Fatal("NewSpec succeeded with ~/.claude.json as a directory; want an error")
+		}
+	})
 }

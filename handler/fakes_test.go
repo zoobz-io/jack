@@ -151,6 +151,20 @@ func (g *fakeGit) GlobalIdentity(_ context.Context) (name, email string, err err
 	return g.IdentityName, g.IdentityEmail, g.IdentityErr
 }
 
+// claudeHome points HOME at a temp dir seeded with the host Claude state
+// (~/.claude and ~/.claude.json) that core.NewSpec requires before mounting.
+func claudeHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o750); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write .claude.json: %v", err)
+	}
+}
+
 // testEnv builds a config.Env whose directories live under a fresh t.TempDir(),
 // so handlers that touch the filesystem stay isolated per test.
 func testEnv(t *testing.T) *config.Env {

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -33,18 +34,22 @@ func TestInSessionExistsAttaches(t *testing.T) {
 }
 
 func TestInStartsContainerAndCreatesSession(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	claudeHome(t)
 	env := testEnv(t)
 
-	// Session absent and container not running.
+	// Session absent and container nonexistent (Running errors for a container
+	// that does not exist).
 	tm := &fakeTmux{HasResult: false}
-	d := &fakeDocker{RunningResult: false}
+	d := &fakeDocker{RunningErr: errors.New("no such container")}
 	app := testApp(env, profileConfig("alex"), d, tm, &fakeGit{})
 
 	if err := in(context.Background(), app, "alex", "jack"); err != nil {
 		t.Fatalf("in returned error: %v", err)
 	}
 
+	if len(d.StopNames) != 0 {
+		t.Errorf("Stop called for a nonexistent container: %v", d.StopNames)
+	}
 	if len(d.RunSpecs) != 1 {
 		t.Fatalf("Run called %d times, want 1", len(d.RunSpecs))
 	}
@@ -63,15 +68,59 @@ func TestInStartsContainerAndCreatesSession(t *testing.T) {
 	}
 }
 
+func TestInRemovesStoppedContainerBeforeRun(t *testing.T) {
+	claudeHome(t)
+	env := testEnv(t)
+
+	// Session absent; the container exists but is stopped (e.g. after a host
+	// reboot): Running reports (false, nil). The remnant must be removed before
+	// the fresh run, or `docker run --name` would collide with it.
+	tm := &fakeTmux{HasResult: false}
+	d := &fakeDocker{RunningResult: false, RunningErr: nil}
+	app := testApp(env, profileConfig("alex"), d, tm, &fakeGit{})
+
+	if err := in(context.Background(), app, "alex", "jack"); err != nil {
+		t.Fatalf("in returned error: %v", err)
+	}
+
+	if len(d.StopNames) != 1 || d.StopNames[0] != "jack-alex-jack" {
+		t.Errorf("Stop = %v, want [jack-alex-jack] to clear the stopped remnant", d.StopNames)
+	}
+	if len(d.RunSpecs) != 1 {
+		t.Fatalf("Run called %d times, want 1", len(d.RunSpecs))
+	}
+	if len(tm.AttachNames) != 1 || tm.AttachNames[0] != "alex-jack" {
+		t.Errorf("Attach = %v, want [alex-jack]", tm.AttachNames)
+	}
+}
+
+func TestInStoppedContainerRemovalFails(t *testing.T) {
+	claudeHome(t)
+	env := testEnv(t)
+
+	// Removing the stopped remnant fails: in must surface the error rather than
+	// attempt a doomed `docker run`.
+	tm := &fakeTmux{HasResult: false}
+	d := &fakeDocker{RunningResult: false, StopErr: errors.New("permission denied")}
+	app := testApp(env, profileConfig("alex"), d, tm, &fakeGit{})
+
+	if err := in(context.Background(), app, "alex", "jack"); err == nil {
+		t.Fatal("in succeeded despite failing to remove the stopped container")
+	}
+	if len(d.RunSpecs) != 0 {
+		t.Errorf("Run called %d times after a failed removal, want 0", len(d.RunSpecs))
+	}
+}
+
 func TestInModelResolution(t *testing.T) {
 	// The top-level default reaches the container when the profile sets no model.
 	t.Run("default", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
+		claudeHome(t)
 		cfg := &config.Config{
 			Model:    "claude-sonnet-5",
 			Profiles: map[domain.Agent]config.Profile{"alex": {}},
 		}
-		d := &fakeDocker{RunningResult: false}
+		d := &fakeDocker{RunningErr: errors.New("no such container")}
 		app := testApp(testEnv(t), cfg, d, &fakeTmux{HasResult: false}, &fakeGit{})
 
 		if err := in(context.Background(), app, "alex", "jack"); err != nil {
@@ -84,12 +133,12 @@ func TestInModelResolution(t *testing.T) {
 
 	// A per-profile model overrides the top-level default.
 	t.Run("override", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
+		claudeHome(t)
 		cfg := &config.Config{
 			Model:    "claude-sonnet-5",
 			Profiles: map[domain.Agent]config.Profile{"alex": {Model: "claude-opus-4-8"}},
 		}
-		d := &fakeDocker{RunningResult: false}
+		d := &fakeDocker{RunningErr: errors.New("no such container")}
 		app := testApp(testEnv(t), cfg, d, &fakeTmux{HasResult: false}, &fakeGit{})
 
 		if err := in(context.Background(), app, "alex", "jack"); err != nil {
@@ -104,13 +153,13 @@ func TestInModelResolution(t *testing.T) {
 func TestInPermissionResolution(t *testing.T) {
 	// The top-level default flows into the launch command when the profile is bare.
 	t.Run("default", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
+		claudeHome(t)
 		cfg := &config.Config{
 			Permission: config.PermissionBypass,
 			Profiles:   map[domain.Agent]config.Profile{"alex": {}},
 		}
 		tm := &fakeTmux{HasResult: false}
-		app := testApp(testEnv(t), cfg, &fakeDocker{RunningResult: false}, tm, &fakeGit{})
+		app := testApp(testEnv(t), cfg, &fakeDocker{RunningErr: errors.New("no such container")}, tm, &fakeGit{})
 
 		if err := in(context.Background(), app, "alex", "jack"); err != nil {
 			t.Fatalf("in returned error: %v", err)
@@ -125,13 +174,13 @@ func TestInPermissionResolution(t *testing.T) {
 
 	// A per-profile permission overrides the top-level default.
 	t.Run("override", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
+		claudeHome(t)
 		cfg := &config.Config{
 			Permission: config.PermissionBypass,
 			Profiles:   map[domain.Agent]config.Profile{"alex": {Permission: config.PermissionAcceptEdits}},
 		}
 		tm := &fakeTmux{HasResult: false}
-		app := testApp(testEnv(t), cfg, &fakeDocker{RunningResult: false}, tm, &fakeGit{})
+		app := testApp(testEnv(t), cfg, &fakeDocker{RunningErr: errors.New("no such container")}, tm, &fakeGit{})
 
 		if err := in(context.Background(), app, "alex", "jack"); err != nil {
 			t.Fatalf("in returned error: %v", err)

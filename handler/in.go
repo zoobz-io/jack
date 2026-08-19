@@ -71,9 +71,18 @@ func in(ctx context.Context, app *core.App, agent domain.Agent, repo domain.Repo
 
 	scr := tools.For(id)
 
-	// Ensure the container is up.
-	running, _ := app.Docker().Running(ctx, id.Container)
+	// Ensure the container is up. Running errors when the container does not
+	// exist (or docker itself is unavailable, which the Run below then reports);
+	// (false, nil) means it exists but is stopped — e.g. after a host reboot —
+	// and would collide with the fresh `docker run`, so remove the remnant and
+	// rebuild it. The tools volume survives; the container is disposable.
+	running, rerr := app.Docker().Running(ctx, id.Container)
 	if !running {
+		if rerr == nil {
+			if serr := app.Docker().Stop(ctx, id.Container); serr != nil {
+				return fmt.Errorf("removing stopped container %s: %w", id.Container, serr)
+			}
+		}
 		spec, serr := core.NewSpec(id, profile, app.Env(), app.Config().CA)
 		if serr != nil {
 			return serr

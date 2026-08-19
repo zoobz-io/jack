@@ -78,6 +78,29 @@ func TestInStartsContainerAndCreatesSession(t *testing.T) {
 	}
 }
 
+func TestInInjectsAgentSecrets(t *testing.T) {
+	claudeHome(t)
+	env := testEnv(t)
+
+	// A secrets file for the agent lands in the container env on fresh start.
+	if err := os.MkdirAll(filepath.Join(env.DataDir, "secrets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env.SecretsPath("alex"), []byte("GH_TOKEN=ghp_alex\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &fakeDocker{RunningErr: errors.New("no such container")}
+	app := testApp(env, profileConfig("alex"), d, &fakeTmux{HasResult: false}, &fakeGit{})
+
+	if err := in(context.Background(), app, "alex", "jack", false); err != nil {
+		t.Fatalf("in returned error: %v", err)
+	}
+	if got := d.RunSpecs[0].Env["GH_TOKEN"]; got != "ghp_alex" {
+		t.Errorf("GH_TOKEN = %q, want ghp_alex", got)
+	}
+}
+
 func TestInReseedRelinksCredentials(t *testing.T) {
 	home := claudeHome(t)
 	env := testEnv(t)

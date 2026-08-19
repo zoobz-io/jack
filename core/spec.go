@@ -39,8 +39,10 @@ type Spec struct {
 // NewSpec assembles the container Spec for an agent-repo session: the
 // container name, the bind mounts, the persistent tools volume, and the
 // environment. The agent's private Claude state paths are mounted as-is; the
-// caller must have seeded them first (see Env.EnsureClaudeState).
-func NewSpec(id *domain.Identity, profile config.Profile, env *config.Env, ca config.CAConfig) *Spec {
+// caller must have seeded them first (see Env.EnsureClaudeState). secrets are
+// caller-supplied env vars (see Env.AgentSecrets) injected before jack's own,
+// so they can never shadow the keys jack depends on.
+func NewSpec(id *domain.Identity, profile config.Profile, env *config.Env, ca config.CAConfig, secrets map[string]string) *Spec {
 	agentDir := filepath.Join(env.DataDir, string(id.Agent()))
 	mounts := []Mount{
 		{Source: env.ClaudeDir(id.Agent()), Target: home + "/.claude"},
@@ -70,7 +72,11 @@ func NewSpec(id *domain.Identity, profile config.Profile, env *config.Env, ca co
 		Target: home + "/.jack/bin",
 	}
 
-	session := map[string]string{"JACK_AGENT": string(id.Agent())}
+	session := make(map[string]string, len(secrets)+8)
+	for k, v := range secrets {
+		session[k] = v
+	}
+	session["JACK_AGENT"] = string(id.Agent())
 
 	// docker exec does not inherit the host's COLORTERM, so claude can't detect
 	// 24-bit color support inside the container. Propagate it, defaulting to

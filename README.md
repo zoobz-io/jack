@@ -13,7 +13,7 @@
 
 jack gives every agent an isolated Docker container, a dedicated tmux session, its own git/GitHub identity, and its own Claude Code configuration. You clone a repo *for an agent*, then drop *into* that agent's session — a real `claude` running against a real checkout, sandboxed away from your host and from every other agent.
 
-That's the whole job. jack does not manage secrets, message-passing, or the GitHub API — the agent handles those from inside its container. jack builds the box, wires up the identity, and gets you a session.
+That's the whole job. jack does not manage message-passing or the GitHub API — the agent handles those from inside its container. Secrets stay yours too: jack forwards a per-agent env file into the container if you keep one, but never stores or creates credentials. jack builds the box, wires up the identity, and gets you a session.
 
 ---
 
@@ -158,6 +158,14 @@ The `agents/<agent>/` directory is **copied** into the agent's workspace and bin
 
 Setup scripts run in order on each fresh container — **global → agent → project** — and only if the corresponding host file exists. jack deliberately has no opinion about what tools an agent needs; that belongs in `dev.sh`.
 
+### Secrets
+
+Per-agent secrets ride the container **environment**, never the config tree — the config dir is mounted read-only into *every* container (and tends to live in a dotfiles repo), so a token there would be visible to all agents and one `git add` from being published.
+
+Instead, keep an env file per agent in the data dir: `~/.jack/secrets/<agent>.env`, mode `600` (enforced — jack refuses a file readable by group/other), plain `KEY=VALUE` lines with `#` comments. If the file exists, `jack in` injects its variables into that agent's container; a missing file simply means no secrets. Values are taken verbatim — no quoting or expansion — and can never shadow jack's own variables (`JACK_AGENT`, `GIT_*`, …).
+
+The canonical use is GitHub identity: put a fine-grained PAT in `GH_TOKEN=…` scoped to the repos that agent works, and the `gh` CLI picks it up with no login step. Add `gh auth setup-git` to your global `setup.sh` and HTTPS `git push` authenticates through the same token. The secret then exists in exactly two places: a 600-mode file on your host, and the environment of the one container it belongs to.
+
 ### Data directory layout
 
 jack manages this tree itself; you don't edit it by hand:
@@ -165,6 +173,8 @@ jack manages this tree itself; you don't edit it by hand:
 ```
 ~/.jack/
 ├── registry.yaml             # which repos are cloned for which agents
+├── secrets/                  # optional; yours to manage, jack only reads it
+│   └── <agent>.env           # KEY=VALUE lines injected into that agent's container
 └── <agent>/
     ├── .claude/              # agent config, copied from ~/.config/jack/agents/<agent>/
     ├── claude/               # agent's private Claude state (history, memory);

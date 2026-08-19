@@ -100,7 +100,12 @@ func in(ctx context.Context, app *core.App, agent domain.Agent, repo domain.Repo
 			return serr
 		}
 
-		spec := core.NewSpec(id, profile, app.Env(), app.Config().CA)
+		secrets, serr := app.Env().AgentSecrets(agent)
+		if serr != nil {
+			return fmt.Errorf("loading agent secrets: %w", serr)
+		}
+
+		spec := core.NewSpec(id, profile, app.Env(), app.Config().CA, secrets)
 		if rerr := app.Docker().Run(ctx, *spec); rerr != nil {
 			return fmt.Errorf("starting container: %w", rerr)
 		}

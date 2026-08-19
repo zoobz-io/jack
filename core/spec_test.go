@@ -43,7 +43,7 @@ func TestNewSpec(t *testing.T) {
 		Provisioner: "jack",
 	}
 
-	spec := NewSpec(id, profile, env, ca)
+	spec := NewSpec(id, profile, env, ca, nil)
 
 	if spec.Name != id.Container {
 		t.Errorf("spec.Name = %q, want %q", spec.Name, id.Container)
@@ -115,13 +115,13 @@ func TestNewSpecModel(t *testing.T) {
 	}
 
 	// A profile with a model sets ANTHROPIC_MODEL.
-	spec := NewSpec(id, config.Profile{Model: "claude-opus-4-8"}, env, config.CAConfig{})
+	spec := NewSpec(id, config.Profile{Model: "claude-opus-4-8"}, env, config.CAConfig{}, nil)
 	if spec.Env["ANTHROPIC_MODEL"] != "claude-opus-4-8" {
 		t.Errorf("ANTHROPIC_MODEL = %q, want claude-opus-4-8", spec.Env["ANTHROPIC_MODEL"])
 	}
 
 	// A profile with no model leaves ANTHROPIC_MODEL unset.
-	spec = NewSpec(id, config.Profile{}, env, config.CAConfig{})
+	spec = NewSpec(id, config.Profile{}, env, config.CAConfig{}, nil)
 	if _, ok := spec.Env["ANTHROPIC_MODEL"]; ok {
 		t.Errorf("ANTHROPIC_MODEL set unexpectedly = %q", spec.Env["ANTHROPIC_MODEL"])
 	}
@@ -137,7 +137,7 @@ func TestNewSpecColorterm(t *testing.T) {
 	// Propagates the host value when set.
 	t.Run("propagates", func(t *testing.T) {
 		t.Setenv("COLORTERM", "24bit")
-		spec := NewSpec(id, config.Profile{}, env, config.CAConfig{})
+		spec := NewSpec(id, config.Profile{}, env, config.CAConfig{}, nil)
 		if spec.Env["COLORTERM"] != "24bit" {
 			t.Errorf("COLORTERM = %q, want 24bit", spec.Env["COLORTERM"])
 		}
@@ -146,7 +146,7 @@ func TestNewSpecColorterm(t *testing.T) {
 	// Defaults to truecolor when the host has none.
 	t.Run("defaults", func(t *testing.T) {
 		t.Setenv("COLORTERM", "")
-		spec := NewSpec(id, config.Profile{}, env, config.CAConfig{})
+		spec := NewSpec(id, config.Profile{}, env, config.CAConfig{}, nil)
 		if spec.Env["COLORTERM"] != "truecolor" {
 			t.Errorf("COLORTERM = %q, want truecolor", spec.Env["COLORTERM"])
 		}
@@ -164,7 +164,7 @@ func TestNewSpecMinimal(t *testing.T) {
 	}
 
 	// Empty profile git and empty CA: only JACK_AGENT should be set.
-	spec := NewSpec(id, config.Profile{}, env, config.CAConfig{})
+	spec := NewSpec(id, config.Profile{}, env, config.CAConfig{}, nil)
 
 	if spec.Env["JACK_AGENT"] != "scout" {
 		t.Errorf("JACK_AGENT = %q, want scout", spec.Env["JACK_AGENT"])
@@ -173,6 +173,28 @@ func TestNewSpecMinimal(t *testing.T) {
 		if _, ok := spec.Env[k]; ok {
 			t.Errorf("env[%q] set unexpectedly = %q", k, spec.Env[k])
 		}
+	}
+}
+
+func TestNewSpecSecrets(t *testing.T) {
+	env := &config.Env{ConfigDir: t.TempDir(), DataDir: t.TempDir()}
+	id, err := domain.NewIdentity(domain.Agent("scout"), domain.Repo("myrepo"))
+	if err != nil {
+		t.Fatalf("NewIdentity: %v", err)
+	}
+
+	// Secrets flow into the container env, but can never shadow jack's own keys.
+	secrets := map[string]string{
+		"GH_TOKEN":   "ghp_secret",
+		"JACK_AGENT": "impostor",
+	}
+	spec := NewSpec(id, config.Profile{}, env, config.CAConfig{}, secrets)
+
+	if spec.Env["GH_TOKEN"] != "ghp_secret" {
+		t.Errorf("GH_TOKEN = %q, want ghp_secret", spec.Env["GH_TOKEN"])
+	}
+	if spec.Env["JACK_AGENT"] != "scout" {
+		t.Errorf("JACK_AGENT = %q, want scout (jack's key must win over a secret)", spec.Env["JACK_AGENT"])
 	}
 }
 
@@ -193,7 +215,7 @@ func TestNewSpecSupportRepoOnDisk(t *testing.T) {
 	}
 
 	profile := config.Profile{Repos: []string{"https://host/u/other.git"}}
-	spec := NewSpec(id, profile, env, config.CAConfig{})
+	spec := NewSpec(id, profile, env, config.CAConfig{}, nil)
 
 	m := findMount(spec.Mounts, "/repos/other")
 	if m == nil {
@@ -216,7 +238,7 @@ func TestNewSpecSupportRepoMissingSkipped(t *testing.T) {
 
 	// Support repo not created on disk -> skipped.
 	profile := config.Profile{Repos: []string{"https://host/u/other.git"}}
-	spec := NewSpec(id, profile, env, config.CAConfig{})
+	spec := NewSpec(id, profile, env, config.CAConfig{}, nil)
 
 	if m := findMount(spec.Mounts, "/repos/other"); m != nil {
 		t.Errorf("support repo not on disk should be skipped, got mount %+v", m)

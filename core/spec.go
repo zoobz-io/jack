@@ -47,6 +47,10 @@ func NewSpec(id *domain.Identity, profile config.Profile, env *config.Env, ca co
 	mounts := []Mount{
 		{Source: env.ClaudeDir(id.Agent()), Target: home + "/.claude"},
 		{Source: env.ClaudeJSON(id.Agent()), Target: home + "/.claude.json"},
+		// The rendered session env, sourced at claude launch so `jack refresh`
+		// can swap secrets without recreating the container. The caller must
+		// have written it first (see Env.WriteSessionEnv).
+		{Source: env.SessionEnv(id.Agent()), Target: home + "/.jack/session.env", ReadOnly: true},
 		{Source: filepath.Join(agentDir, ".claude"), Target: home + "/workspace/.claude", ReadOnly: true},
 		{Source: filepath.Join(agentDir, string(id.Repo())), Target: home + "/workspace/" + string(id.Repo())},
 		// The user's jack config, read-only, so setup scripts can run from it.

@@ -31,12 +31,18 @@ func (e *Env) ClaudeJSON(agent domain.Agent) string {
 
 // EnsureClaudeState guarantees the agent's private Claude state exists,
 // seeding it from the host login on first use. The seed is the minimum an
-// agent needs to authenticate: the credentials file (hard-linked to the host's
-// so token refreshes stay shared, copied when linking fails) and a claude.json
-// holding only the claudeSeedKeys. Everything the agent accumulates afterwards
-// — history, project state, settings — lives in its own directory, invisible
-// to the host and to other agents. Existing state is left untouched, so a
-// second call is a no-op and re-running never clobbers an agent's memory.
+// agent needs to authenticate: the credentials file (hard-linked to the
+// host's, copied when linking fails) and a claude.json holding only the
+// claudeSeedKeys. Everything the agent accumulates afterwards — history,
+// project state, settings — lives in its own directory, invisible to the host
+// and to other agents. Existing state is left untouched, so a second call is
+// a no-op and re-running never clobbers an agent's memory.
+//
+// The credential link shares the token only until the next refresh: Claude
+// Code rewrites .credentials.json atomically (write temp + rename), which
+// severs the hard link and strands every agent on the old inode — whose
+// refresh token the rotation just invalidated. `jack refresh` re-links from
+// the host login when that happens.
 func (e *Env) EnsureClaudeState(agent domain.Agent) error {
 	hostDir, hostJSON, err := hostClaudeState()
 	if err != nil {
@@ -80,9 +86,11 @@ func (e *Env) EnsureClaudeState(agent domain.Agent) error {
 }
 
 // ReseedClaudeCredentials replaces the agent's credentials file with a fresh
-// link to the host's, for when a copied credential has drifted from the host
-// login (e.g. after a token rotation). The rest of the agent's state — its
-// memory — is kept.
+// link to the host's, for when the agent's credential has drifted from the
+// host login (a token refresh severs the hard link — see EnsureClaudeState).
+// The rest of the agent's state — its memory — is kept. The link is replaced
+// inside the agent's claude dir, whose inode a running container's bind mount
+// holds, so the fresh credential is visible in the container immediately.
 func (e *Env) ReseedClaudeCredentials(agent domain.Agent) error {
 	hostDir, _, err := hostClaudeState()
 	if err != nil {
@@ -101,6 +109,59 @@ func (e *Env) ReseedClaudeCredentials(agent domain.Agent) error {
 		return err
 	}
 	return linkOrCopy(hostCreds, agentCreds)
+}
+
+// ReseedClaudeJSON refreshes the account keys (claudeSeedKeys) in the agent's
+// claude.json from the host's, leaving everything else the agent has
+// accumulated untouched. Seed keys the host no longer has are removed, so the
+// agent's account identity always mirrors the host login. A missing agent
+// claude.json is seeded fresh, as EnsureClaudeState would. The file is
+// rewritten in place (truncate + write, never rename) because a running
+// container bind-mounts it by inode; a rename would strand the mount on the
+// old file.
+func (e *Env) ReseedClaudeJSON(agent domain.Agent) error {
+	_, hostJSON, err := hostClaudeState()
+	if err != nil {
+		return err
+	}
+	seed, err := hostSeedValues(hostJSON)
+	if err != nil {
+		return err
+	}
+
+	agentPath := e.ClaudeJSON(agent)
+	agentDoc := make(map[string]json.RawMessage)
+	data, err := os.ReadFile(filepath.Clean(agentPath))
+	switch {
+	case os.IsNotExist(err):
+		// No agent claude.json yet; the merge below writes a fresh seed.
+	case err != nil:
+		return fmt.Errorf("reading %s: %w", agentPath, err)
+	default:
+		if uerr := json.Unmarshal(data, &agentDoc); uerr != nil {
+			return fmt.Errorf("parsing %s: %w", agentPath, uerr)
+		}
+	}
+
+	for _, k := range claudeSeedKeys {
+		if v, ok := seed[k]; ok {
+			agentDoc[k] = v
+		} else {
+			delete(agentDoc, k)
+		}
+	}
+
+	out, err := json.MarshalIndent(agentDoc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("rendering agent claude.json: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(agentPath), 0o750); err != nil {
+		return fmt.Errorf("creating agent dir: %w", err)
+	}
+	if werr := os.WriteFile(agentPath, out, 0o600); werr != nil {
+		return fmt.Errorf("writing agent claude.json: %w", werr)
+	}
+	return nil
 }
 
 // hostClaudeState locates the host's Claude login (~/.claude and
@@ -142,6 +203,20 @@ func hostClaudeState() (dir, file string, err error) {
 // returning a minimal document for a fresh agent. Keys absent on the host are
 // omitted; claude re-derives whatever it needs.
 func seedClaudeJSON(hostPath string) ([]byte, error) {
+	seed, err := hostSeedValues(hostPath)
+	if err != nil {
+		return nil, err
+	}
+	out, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("rendering agent claude.json: %w", err)
+	}
+	return out, nil
+}
+
+// hostSeedValues reads the host's claude.json and returns just the
+// claudeSeedKeys present in it, raw.
+func hostSeedValues(hostPath string) (map[string]json.RawMessage, error) {
 	data, err := os.ReadFile(filepath.Clean(hostPath))
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", hostPath, err)
@@ -156,11 +231,7 @@ func seedClaudeJSON(hostPath string) ([]byte, error) {
 			seed[k] = v
 		}
 	}
-	out, err := json.MarshalIndent(seed, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("rendering agent claude.json: %w", err)
-	}
-	return out, nil
+	return seed, nil
 }
 
 // linkOrCopy hardlinks src to dst so in-place writes to either are shared,

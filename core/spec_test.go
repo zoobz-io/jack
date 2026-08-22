@@ -49,7 +49,7 @@ func TestNewSpec(t *testing.T) {
 		t.Errorf("spec.Name = %q, want %q", spec.Name, id.Container)
 	}
 
-	// The four standard binds plus the read-only .config/jack mount. The Claude
+	// The standard binds plus the read-only .config/jack mount. The Claude
 	// state binds come from the agent's private state under DataDir, not the
 	// host's ~/.claude.
 	wantMounts := map[string]struct {
@@ -58,6 +58,7 @@ func TestNewSpec(t *testing.T) {
 	}{
 		home + "/.claude":           {source: filepath.Join(dataDir, "scout", "claude"), readOnly: false},
 		home + "/.claude.json":      {source: filepath.Join(dataDir, "scout", "claude.json"), readOnly: false},
+		home + "/.jack/session.env": {source: filepath.Join(dataDir, "scout", "session.env"), readOnly: true},
 		home + "/workspace/.claude": {source: filepath.Join(dataDir, "scout", ".claude"), readOnly: true},
 		home + "/workspace/myrepo":  {source: filepath.Join(dataDir, "scout", "myrepo"), readOnly: false},
 		home + "/.config/jack":      {source: configDir, readOnly: true},

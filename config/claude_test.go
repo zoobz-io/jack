@@ -166,6 +166,129 @@ func TestEnsureClaudeStateMissingHostLogin(t *testing.T) {
 	})
 }
 
+func TestReseedClaudeJSON(t *testing.T) {
+	hostLogin(t)
+	env := &Env{DataDir: t.TempDir()}
+
+	if err := env.EnsureClaudeState("case"); err != nil {
+		t.Fatalf("EnsureClaudeState: %v", err)
+	}
+
+	// The agent accumulates its own state and holds a stale account identity.
+	agentJSON := `{
+		"userID": "u-stale",
+		"oauthAccount": {"email": "old@example.com"},
+		"agentMemory": "keep me",
+		"projects": {"/root/workspace/app": {"history": ["agent work"]}}
+	}`
+	if err := os.WriteFile(env.ClaudeJSON("case"), []byte(agentJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(env.ClaudeJSON("case"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.ReseedClaudeJSON("case"); err != nil {
+		t.Fatalf("ReseedClaudeJSON: %v", err)
+	}
+
+	data, err := os.ReadFile(env.ClaudeJSON("case"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("agent claude.json is not valid JSON: %v", err)
+	}
+
+	// Seed keys are refreshed from the host.
+	if doc["userID"] != "u-123" {
+		t.Errorf("userID = %v, want host's u-123", doc["userID"])
+	}
+	if acct, ok := doc["oauthAccount"].(map[string]any); !ok || acct["email"] != "op@example.com" {
+		t.Errorf("oauthAccount = %v, want the host's", doc["oauthAccount"])
+	}
+	if doc["hasCompletedOnboarding"] != true {
+		t.Errorf("hasCompletedOnboarding = %v, want true (from host)", doc["hasCompletedOnboarding"])
+	}
+
+	// The agent's own state is preserved.
+	if doc["agentMemory"] != "keep me" {
+		t.Errorf("agentMemory = %v, agent state was clobbered", doc["agentMemory"])
+	}
+	if _, ok := doc["projects"]; !ok {
+		t.Error("agent projects state was clobbered")
+	}
+
+	// Rewritten in place: same inode, so a container's bind mount still sees it.
+	after, err := os.Stat(env.ClaudeJSON("case"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("claude.json was replaced (new inode), want an in-place rewrite")
+	}
+}
+
+func TestReseedClaudeJSONRemovesHostDroppedKeys(t *testing.T) {
+	home := hostLogin(t)
+	env := &Env{DataDir: t.TempDir()}
+
+	// The host login has no userID (e.g. after a re-login as another account
+	// shape); the agent still carries one.
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"oauthAccount": {"email": "op@example.com"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(env.DataDir, "case"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env.ClaudeJSON("case"), []byte(`{"userID": "u-stale", "agentMemory": "keep me"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.ReseedClaudeJSON("case"); err != nil {
+		t.Fatalf("ReseedClaudeJSON: %v", err)
+	}
+	data, err := os.ReadFile(env.ClaudeJSON("case"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doc["userID"]; ok {
+		t.Error("userID kept although the host no longer has it")
+	}
+	if doc["agentMemory"] != "keep me" {
+		t.Error("agent state was clobbered")
+	}
+}
+
+func TestReseedClaudeJSONSeedsMissingFile(t *testing.T) {
+	hostLogin(t)
+	env := &Env{DataDir: t.TempDir()}
+
+	if err := env.ReseedClaudeJSON("case"); err != nil {
+		t.Fatalf("ReseedClaudeJSON: %v", err)
+	}
+	data, err := os.ReadFile(env.ClaudeJSON("case"))
+	if err != nil {
+		t.Fatalf("agent claude.json not created: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["userID"] != "u-123" {
+		t.Errorf("userID = %v, want u-123", doc["userID"])
+	}
+	if _, ok := doc["projects"]; ok {
+		t.Error("host-only key leaked into fresh agent claude.json")
+	}
+}
+
 func TestReseedClaudeCredentials(t *testing.T) {
 	home := hostLogin(t)
 	env := &Env{DataDir: t.TempDir()}

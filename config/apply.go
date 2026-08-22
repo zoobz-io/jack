@@ -15,19 +15,27 @@ import (
 // ApplyAgent copies the agent's config directory (agents/<name>/ under the user
 // config dir) into that agent's workspace .claude directory
 // (<data>/<name>/.claude). Claude Code's config inheritance then merges it with
-// any .claude in the repo. The destination is rebuilt from scratch so stale
-// files from a previous apply do not linger.
+// any .claude in the repo. The destination's contents are rebuilt from scratch
+// so stale files from a previous apply do not linger — but the directory itself
+// is kept: a running container bind-mounts it by inode, and replacing the
+// directory would strand the mount on the stale copy.
 func (e *Env) ApplyAgent(agent domain.Agent) error {
 	src := filepath.Join(e.ConfigDir, "agents", string(agent))
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("agent directory not found: agents/%s/", agent)
 	}
 	dst := filepath.Join(e.DataDir, string(agent), ".claude")
-	if err := os.RemoveAll(dst); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(dst, 0o750); err != nil {
 		return fmt.Errorf("creating agent .claude dir: %w", err)
+	}
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(dst, entry.Name())); err != nil {
+			return err
+		}
 	}
 	return copyDir(src, dst)
 }

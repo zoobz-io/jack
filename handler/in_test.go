@@ -76,6 +76,17 @@ func TestInStartsContainerAndCreatesSession(t *testing.T) {
 	if _, err := os.Stat(env.ClaudeJSON("alex")); err != nil {
 		t.Errorf("agent claude.json not seeded: %v", err)
 	}
+	// …and renders the session env the spec mounts, even with no secrets.
+	if _, err := os.Stat(env.SessionEnv("alex")); err != nil {
+		t.Errorf("session env not rendered: %v", err)
+	}
+
+	// The launch sources the session env before exec'ing claude, so a later
+	// `jack refresh` reaches the next launch without recreating the container.
+	cmd := tm.CreateCalls[0].Cmd
+	if !strings.Contains(cmd, ". /root/.jack/session.env; exec claude") {
+		t.Errorf("launch cmd = %q, want it to source the session env then exec claude", cmd)
+	}
 }
 
 func TestInInjectsAgentSecrets(t *testing.T) {

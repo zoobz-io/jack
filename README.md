@@ -164,6 +164,8 @@ Per-agent secrets ride the container **environment**, never the config tree — 
 
 Instead, keep an env file per agent in the data dir: `~/.jack/secrets/<agent>.env`, mode `600` (enforced — jack refuses a file readable by group/other), plain `KEY=VALUE` lines with `#` comments. If the file exists, `jack in` injects its variables into that agent's container; a missing file simply means no secrets. Values are taken verbatim — no quoting or expansion — and can never shadow jack's own variables (`JACK_AGENT`, `GIT_*`, …).
 
+Secrets reach `claude` through a **session env**: jack renders the secrets into `~/.jack/<agent>/session.env`, mounts it into the container, and sources it right before `claude` launches (they are also in the container's creation-time environment, for setup scripts). Because the sourced file — not the baked container env — is what a claude session sees, rotating a secret does not require recreating the container: edit the secrets file, run `jack refresh`, and the next claude launch in the same container picks it up. Edit only the `secrets/<agent>.env` source, never the rendered `session.env` — jack overwrites it, and it must only ever be rewritten in place (an editor's rename-on-save would strand the container's mount on the old file).
+
 The canonical use is GitHub identity: put a fine-grained PAT in `GH_TOKEN=…` scoped to the repos that agent works, and the `gh` CLI picks it up with no login step. Add `gh auth setup-git` to your global `setup.sh` and HTTPS `git push` authenticates through the same token. The secret then exists in exactly two places: a 600-mode file on your host, and the environment of the one container it belongs to.
 
 ### Data directory layout
@@ -180,10 +182,11 @@ jack manages this tree itself; you don't edit it by hand:
     ├── claude/               # agent's private Claude state (history, memory);
     │                         #   credentials seeded from ~/.claude by hard link
     ├── claude.json           # agent's claude.json, seeded with account keys only
+    ├── session.env           # secrets rendered as exports, sourced at claude launch
     └── <repo>/               # the clone (mounted rw into the container)
 ```
 
-The `claude/` state is what makes agents Claude-deep identities rather than just git identities: each agent accumulates its own history and project memory, invisible to your host session and to other agents. Only the login is shared — the credentials file is hard-linked to the host's, so a token refresh on either side stays in sync. If a credential ever drifts (e.g. the link degraded to a copy across filesystems and a rotation broke it), `jack in --reseed` relinks it from the host login without touching the agent's memory.
+The `claude/` state is what makes agents Claude-deep identities rather than just git identities: each agent accumulates its own history and project memory, invisible to your host session and to other agents. Only the login is shared — the credentials file is seeded as a hard link to the host's. The link shares the token only until the next refresh: Claude Code rewrites its credentials atomically (write temp + rename), which severs the link and strands the agents on the old token — whose refresh token that same rotation just invalidated. When an agent's login expires inside its container but not on the host, `jack refresh` re-links the credentials (and re-applies config) from the host without touching the agent's memory; `jack in --reseed` is the narrower credentials-only variant.
 
 ---
 
@@ -194,11 +197,12 @@ jack init  [--agent] [--git-name] [--git-email] [--github] [--build]  Scaffold c
 jack clone <url> --agent <name>...   Clone a repo into one or more agents' workspaces
 jack in    [--agent] [--project] [--reseed]  Enter (attach or create) a session
 jack out   [name | --agent --project]  Terminate a session and stop its container
+jack refresh [--agent]               Sync an agent's config, secrets, and Claude credentials from the host
 jack kill  [--agent] [--project]     Tear down everything for an agent-repo
 jack status                          Show agents, sessions, and containers
 ```
 
-Commands that address an existing agent-repo (`in`, `kill`) resolve missing `--agent`/`--project` flags from the registry — automatically when there's one option, interactively when there's more than one.
+Commands that address an existing agent-repo (`in`, `kill`) resolve missing `--agent`/`--project` flags from the registry — automatically when there's one option, interactively when there's more than one. `refresh` resolves its `--agent` the same way.
 
 ### Set up jack
 
@@ -235,6 +239,15 @@ jack in -a alex -p myapp --reseed       # also relink the agent's Claude credent
 ```
 
 `in` starts the container if it isn't running — seeding the agent's private Claude state on first use, then bootstrapping the agent's certificate (when a CA is configured) and running setup scripts — launches `claude` in the agent's permission mode, and attaches you. If the session already exists, it just re-attaches.
+
+### Refresh an agent
+
+```sh
+jack refresh -a alex     # explicit
+jack refresh             # pick the agent interactively
+```
+
+`refresh` brings an agent back in step with the host: it re-applies the agent's config (`agents/<name>/` into its workspace `.claude`), refreshes the account keys in its `claude.json`, re-renders its [secrets](#secrets) into the session env, and re-links its Claude credentials from the host login. Everything is replaced in place inside paths a running container has mounted, so nothing needs a container rebuild. Config and credentials land immediately — this is the fix when an agent's login has expired inside its container but not on the host (a token refresh on either side severs the shared credential link; see [Data directory layout](#data-directory-layout)). Secrets land on the next claude launch: a running process keeps the env it started with, so after rotating e.g. `GH_TOKEN`, exit claude and `jack in` again — the container keeps running. The agent's memory is untouched. Model env vars remain creation-time state; recreate the container to change those.
 
 ### Leave or tear down
 
@@ -280,7 +293,8 @@ The base image is `node:22-slim` plus `git`, `curl`, the smallstep `step` CLI, a
 ├── .config/jack          ← ~/.config/jack     (read-only, for setup scripts)
 ├── .jack/
 │   ├── bin               ← named tools volume (persists across sessions)
-│   └── certs             ← cert.pem / key.pem (issued at bootstrap)
+│   ├── certs             ← cert.pem / key.pem (issued at bootstrap)
+│   └── session.env       ← ~/.jack/<agent>/session.env  (read-only, sourced at claude launch)
 └── workspace/
     ├── .claude           ← agent config       (read-only, inherited by claude)
     └── <repo>            ← the clone           (rw, WORKDIR of the session)

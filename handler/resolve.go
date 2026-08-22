@@ -14,24 +14,9 @@ import (
 // taken automatically and none is an error. It backs the commands that address
 // an existing agent-repo (in, kill).
 func resolve(reg *config.Registry, agent domain.Agent, repo domain.Repo) (domain.Agent, domain.Repo, error) {
-	if agent == "" {
-		agents := reg.Agents()
-		switch len(agents) {
-		case 0:
-			return "", "", fmt.Errorf("no projects cloned — run jack clone first")
-		case 1:
-			agent = agents[0]
-		default:
-			opts := make([]string, len(agents))
-			for i, a := range agents {
-				opts[i] = string(a)
-			}
-			chosen, err := selectOne("Select an agent", opts)
-			if err != nil {
-				return "", "", fmt.Errorf("selecting agent: %w", err)
-			}
-			agent = domain.Agent(chosen)
-		}
+	agent, err := resolveAgent(reg, agent)
+	if err != nil {
+		return "", "", err
 	}
 
 	if repo == "" {
@@ -55,6 +40,33 @@ func resolve(reg *config.Registry, agent domain.Agent, repo domain.Repo) (domain
 	}
 
 	return agent, repo, nil
+}
+
+// resolveAgent fills in an empty agent from the registry, prompting the user
+// to choose when there is more than one. A single agent is taken automatically
+// and none is an error. It backs the commands that address an agent without a
+// project (refresh) and the agent half of resolve.
+func resolveAgent(reg *config.Registry, agent domain.Agent) (domain.Agent, error) {
+	if agent != "" {
+		return agent, nil
+	}
+	agents := reg.Agents()
+	switch len(agents) {
+	case 0:
+		return "", fmt.Errorf("no projects cloned — run jack clone first")
+	case 1:
+		return agents[0], nil
+	default:
+		opts := make([]string, len(agents))
+		for i, a := range agents {
+			opts[i] = string(a)
+		}
+		chosen, err := selectOne("Select an agent", opts)
+		if err != nil {
+			return "", fmt.Errorf("selecting agent: %w", err)
+		}
+		return domain.Agent(chosen), nil
+	}
 }
 
 // selectOne prompts the user to pick one of options under the given title. It is

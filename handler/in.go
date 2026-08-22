@@ -105,6 +105,13 @@ func in(ctx context.Context, app *core.App, agent domain.Agent, repo domain.Repo
 			return fmt.Errorf("loading agent secrets: %w", serr)
 		}
 
+		// Render the session env the container mounts and sources at claude
+		// launch. Written even when there are no secrets: the mount source
+		// must exist or docker manufactures a directory in its place.
+		if werr := app.Env().WriteSessionEnv(agent); werr != nil {
+			return fmt.Errorf("writing session env: %w", werr)
+		}
+
 		spec := core.NewSpec(id, profile, app.Env(), app.Config().CA, secrets)
 		if rerr := app.Docker().Run(ctx, *spec); rerr != nil {
 			return fmt.Errorf("starting container: %w", rerr)
@@ -134,12 +141,17 @@ func in(ctx context.Context, app *core.App, agent domain.Agent, repo domain.Repo
 	}
 
 	// tmux drives a `docker exec` into the session's workdir, launching claude in
-	// the agent's permission mode.
+	// the agent's permission mode. The session env is sourced first — at launch,
+	// not baked into the container — so a `jack refresh` reaches the next claude
+	// launch in a still-running container. The existence guard keeps containers
+	// created before the session env mount existed launchable.
 	launch := "claude"
 	if flags := profile.Permission.Flags(); flags != "" {
 		launch += " " + flags
 	}
-	tmuxCmd := fmt.Sprintf("docker exec -it -w %s %s %s", id.RepoPath(), id.Container, launch)
+	sessionEnv := domain.ContainerHome + "/.jack/session.env"
+	inner := fmt.Sprintf("[ -f %[1]s ] && . %[1]s; exec %s", sessionEnv, launch)
+	tmuxCmd := fmt.Sprintf("docker exec -it -w %s %s sh -c '%s'", id.RepoPath(), id.Container, inner)
 	if cerr := app.Tmux().Create(ctx, id.Session, tmuxCmd); cerr != nil {
 		if !running {
 			_ = app.Docker().Stop(ctx, id.Container)
